@@ -79,6 +79,37 @@ def execute(filters=None):
 
 		data.append(row)
 
+	# === Add Total Row ===
+	totals_row = {
+    "salary_slip_id": "Total",
+    "is_total_row": 1
+}
+
+	total_fields = [
+		"leave_without_pay",
+		"absent_days",
+		"payment_days",
+		"gross_pay",
+		"total_loan_repayment",
+		"total_deduction",
+		"net_pay",
+	]
+
+	# Include earnings and deduction fields
+	earning_fields = [frappe.scrub(e) for e in earning_types]
+	deduction_fields = [frappe.scrub(d) for d in ded_types]
+	total_fields.extend(earning_fields)
+	total_fields.extend(deduction_fields)
+
+	for field in total_fields:
+		totals_row[field] = 0.0
+
+	for row in data:
+		for field in total_fields:
+			totals_row[field] += flt(row.get(field))
+
+	data.append(totals_row)	
+
 	return columns, data
 
 
@@ -252,6 +283,7 @@ def get_columns(earning_types, ded_types):
 				"options": "currency",
 				"width": 120,
 			},
+			
 			{
 				"label": _("Currency"),
 				"fieldtype": "Data",
@@ -261,6 +293,14 @@ def get_columns(earning_types, ded_types):
 			},
 		]
 	)
+
+	columns.append({
+    "label": "Is Total Row",
+    "fieldname": "is_total_row",
+    "fieldtype": "Check",
+    "hidden": 1
+     })
+	
 	return columns
 
 

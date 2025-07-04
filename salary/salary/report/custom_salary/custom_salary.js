@@ -80,4 +80,15 @@ frappe.query_reports["Custom Salary"] = {
 			width: "100px",
 		},
 	],
+
+	
+	formatter: function(value, row, column, data, default_formatter) {
+        value = default_formatter(value, row, column, data);
+        if (data && data.is_total_row) {
+            // Make all columns bold in the total row
+            return `<b>${value}</b>`;
+        }
+        return value;
+    }	
+
 };
