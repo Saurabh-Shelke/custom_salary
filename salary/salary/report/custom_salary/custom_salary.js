@@ -80,6 +80,7 @@ frappe.query_reports["Custom Salary"] = {
 			width: "100px",
 		},
 	],
+	
 
 	
 	formatter: function(value, row, column, data, default_formatter) {
