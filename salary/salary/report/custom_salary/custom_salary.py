@@ -1291,7 +1291,6 @@
 
 
 
-
 # Copyright (c) 2015, Frappe Technologies Pvt. Ltd. and Contributors
 # License: GNU General Public License v3. See license.txt
 
@@ -1634,16 +1633,7 @@ def get_columns(earning_types, ded_types, report_currency, component_field_map, 
 	# gross
 	columns.append({"label": _("Gross Pay"), "fieldname": "gross_pay", "fieldtype": "Currency", "options": report_currency, "width": 120})
 
-	# component-based Arrears (add after Gross)
-	arrears_fieldname = component_field_map[arrears_label]
-	columns.append({"label": arrears_label, "fieldname": arrears_fieldname, "fieldtype": "Currency", "options": report_currency, "width": 120})
-
-	# top-level Arrears (slip) - optional, you can remove if not needed
-	columns.append({"label": _("Arrears (slip)"), "fieldname": "arrears_slip", "fieldtype": "Currency", "options": report_currency, "width": 120})
-
-	# ALWAYS append Annual Variable Pay column
-	annual_fieldname = component_field_map[annual_label]
-	columns.append({"label": annual_label, "fieldname": annual_fieldname, "fieldtype": "Currency", "options": report_currency, "width": 140})
+	# ❌ Removed arrears, arrears (slip), and annual variable pay columns here
 
 	# deduction columns
 	for deduction in ded_types:
@@ -1719,7 +1709,8 @@ def get_employee_doj_map():
 
 def get_salary_slip_details(salary_slips, currency, company_currency, component_type):
 	"""Return mapping { salary_slip_name: { salary_component_label: amount } }.
-	If currency != company currency, amounts are multiplied by the salary_slip.exchange_rate."""
+	If currency != company currency, amounts are multiplied by the 
+	salary_slip.exchange_rate."""
 	salary_slips = [ss.name for ss in salary_slips]
 
 	result = (
