@@ -1289,15 +1289,12 @@
 
 
 
-
-
 # Copyright (c) 2015, Frappe Technologies Pvt. Ltd. and Contributors
 # License: GNU General Public License v3. See license.txt
 
 import frappe
 from frappe import _
 from frappe.utils import flt
-
 import erpnext
 
 salary_slip = frappe.qb.DocType("Salary Slip")
@@ -1325,33 +1322,33 @@ def execute(filters=None):
 	# detect earning & deduction components present in the selected slips
 	earning_types, ded_types = get_earning_and_deduction_types(salary_slips)
 
-	# build unique fieldname mapping for components (avoid collisions)
-	component_field_map = build_unique_component_field_map(earning_types + ded_types)
-
 	# detect special components
 	annual_component = detect_annual_variable_component(earning_types, forced_annual_component)
 	arrears_component = detect_arrears_component(earning_types)
 	loan_component = detect_loan_repayment_component(ded_types)
 
+	# === FIX: filter out any loan repayment-like deduction labels ===
+	ded_types_no_loan = [d for d in ded_types if not is_loan_repayment_label(d)]
+
+	# build unique fieldname mapping for components (avoid collisions)
+	component_field_map = build_unique_component_field_map(earning_types + ded_types)
+
 	# display labels (prefer detected exact label)
 	annual_label = annual_component or "Annual Variable Pay"
 	arrears_label = arrears_component or "Arrears"
-	# loan column in the report stays as 'Loan Repayment' (fieldname 'total_loan_repayment') but we'll source the amount
-	loan_label_candidates = [loan_component] if loan_component else ["Loan Repayment"]
 
-	# ensure component_field_map has entries for annual/arrears labels (so the column fieldnames exist)
+	# ensure component_field_map has entries for annual/arrears labels
 	if annual_label not in component_field_map:
 		component_field_map[annual_label] = make_unique_scrubbed_fieldname(component_field_map, annual_label)
 	if arrears_label not in component_field_map:
 		component_field_map[arrears_label] = make_unique_scrubbed_fieldname(component_field_map, arrears_label)
-	# if the detected loan component exists and isn't in the map (unlikely), create it
 	if loan_component and loan_component not in component_field_map:
 		component_field_map[loan_component] = make_unique_scrubbed_fieldname(component_field_map, loan_component)
 
-	# build columns
+	# build columns with filtered deduction list
 	columns = get_columns(
 		earning_types,
-		ded_types,
+		ded_types_no_loan,
 		report_currency,
 		component_field_map,
 		annual_label,
@@ -1359,7 +1356,7 @@ def execute(filters=None):
 		arrears_component is not None,
 	)
 
-	# get earnings/deductions maps (these already apply exchange_rate when user requested different currency)
+	# get earnings/deductions maps
 	ss_earning_map = get_salary_slip_details(salary_slips, currency, company_currency, "earnings")
 	ss_ded_map = get_salary_slip_details(salary_slips, currency, company_currency, "deductions")
 
@@ -1383,31 +1380,28 @@ def execute(filters=None):
 			"absent_days": ss.absent_days,
 			"payment_days": ss.payment_days,
 			"currency": report_currency,
-			# We'll populate 'total_loan_repayment' below (from component or top-level fallback)
 			"total_loan_repayment": 0.0,
 		}
 
-		# populate earnings component columns from ss_earning_map
+		# Earnings components
 		for e in earning_types:
 			fname = component_field_map.get(e)
 			row[fname] = flt(ss_earning_map.get(ss.name, {}).get(e, 0.0))
 
-		# populate deductions component columns from ss_ded_map
-		for d in ded_types:
+		# Deductions components (filtered)
+		for d in ded_types_no_loan:
 			fname = component_field_map.get(d)
 			row[fname] = flt(ss_ded_map.get(ss.name, {}).get(d, 0.0))
 
-		# Component-based Arrears column: prefer component value if detected
+		# Arrears
 		arrears_fieldname = component_field_map[arrears_label]
 		if arrears_component:
 			row[arrears_fieldname] = flt(ss_earning_map.get(ss.name, {}).get(arrears_component, 0.0))
 		else:
 			row[arrears_fieldname] = flt(ss_earning_map.get(ss.name, {}).get("Arrears", 0.0))
-
-		# Top-level Arrears (if you want this, we also set 'arrears_slip' from Salary Slip)
 		row["arrears_slip"] = flt(getattr(ss, "arrears", 0.0))
 
-		# Annual Variable Pay: prefer detected component amount; fallback to label key
+		# Annual Variable Pay
 		annual_fieldname = component_field_map[annual_label]
 		annual_val = 0.0
 		if annual_component:
@@ -1416,28 +1410,25 @@ def execute(filters=None):
 			annual_val = flt(ss_earning_map.get(ss.name, {}).get(annual_label, 0.0))
 		row[annual_fieldname] = annual_val
 
-		# === Loan Repayment logic (fix) ===
-		# Priority:
-		#   1. If a deduction component matching loan_component was detected, use its amount from ss_ded_map
-		#   2. Otherwise, fall back to Salary Slip top-level ss.total_loan_repayment (converted if currency requested)
+		# Loan Repayment (single summary)
 		loan_value = 0.0
+		# priority: detected component, common label, top-level field
 		if loan_component:
 			loan_value = flt(ss_ded_map.get(ss.name, {}).get(loan_component, 0.0))
-		# also try common label if not found above
 		if not loan_value:
-			loan_value = flt(ss_ded_map.get(ss.name, {}).get("Loan Repayment", 0.0))
-		# fallback to top-level field (note: top-level field is stored in company currency; if user requested different currency,
-		# convert using ss.exchange_rate)
+			for key in ss_ded_map.get(ss.name, {}):
+				if is_loan_repayment_label(key):
+					loan_value = flt(ss_ded_map.get(ss.name, {}).get(key, 0.0))
+					break
 		if not loan_value:
 			if currency and currency != company_currency:
 				rate = flt(ss.exchange_rate or 1)
 				loan_value = flt(ss.total_loan_repayment or 0.0) * rate
 			else:
 				loan_value = flt(ss.total_loan_repayment or 0.0)
-
 		row["total_loan_repayment"] = loan_value
 
-		# summary fields: gross/total/net (top-level fields on Salary Slip)
+		# summary fields: gross/total/net
 		if currency and currency != company_currency:
 			rate = flt(ss.exchange_rate or 1)
 			row["gross_pay"] = flt(ss.gross_pay) * rate
@@ -1452,23 +1443,19 @@ def execute(filters=None):
 
 	# Totals row
 	totals_row = {"salary_slip_id": "Total", "is_total_row": 1}
-
-	# base total fields
 	total_fields = [
 		"leave_without_pay",
 		"absent_days",
 		"payment_days",
 		"gross_pay",
-		"total_loan_repayment",  # this will now reflect component amount when present
+		"total_loan_repayment",
 		"total_deduction",
 		"net_pay",
 	]
 
-	# include earnings and deduction component fieldnames
 	earning_fields = [component_field_map[e] for e in earning_types]
-	deduction_fields = [component_field_map[d] for d in ded_types]
+	deduction_fields = [component_field_map[d] for d in ded_types_no_loan]
 
-	# ensure arrears & annual included in totals
 	arrears_field = component_field_map[arrears_label]
 	if arrears_field not in earning_fields:
 		earning_fields.append(arrears_field)
@@ -1480,11 +1467,9 @@ def execute(filters=None):
 	total_fields.extend(earning_fields)
 	total_fields.extend(deduction_fields)
 
-	# initialize totals
 	for f in total_fields:
 		totals_row[f] = 0.0
 
-	# sum
 	for row in data:
 		for f in total_fields:
 			totals_row[f] += flt(row.get(f))
@@ -1494,7 +1479,20 @@ def execute(filters=None):
 	return columns, data
 
 
-# ---------------- helper functions ----------------
+# ---------------- Helper Functions ----------------
+
+def is_loan_repayment_label(label):
+	l = (label or "").strip().lower()
+	return (
+		("loan" in l) and (
+			"repay" in l or
+			"repayment" in l or
+			"emi" in l or
+			"installment" in l or
+			"instalment" in l
+		)
+	) or l == "loan repayment"
+
 
 def detect_annual_variable_component(earning_types, forced_name=None):
 	if forced_name:
@@ -1502,10 +1500,8 @@ def detect_annual_variable_component(earning_types, forced_name=None):
 			if e.strip().lower() == forced_name.strip().lower():
 				return e
 		return forced_name
-
 	if not earning_types:
 		return None
-
 	lowered = [e.strip().lower() for e in earning_types]
 	for i, e in enumerate(lowered):
 		if e in ("annual variable pay", "annual variable", "annualvariablepay", "annualvariable", "annualvarpay"):
@@ -1519,10 +1515,6 @@ def detect_annual_variable_component(earning_types, forced_name=None):
 	for i, e in enumerate(lowered):
 		if "avp" in e or "annualvar" in e or "annual_var" in e:
 			return earning_types[i]
-	try:
-		frappe.log_error(f"Earning component names scanned: {earning_types}", "Annual Component Detection - Not Found")
-	except Exception:
-		pass
 	return None
 
 
@@ -1537,24 +1529,11 @@ def detect_arrears_component(earning_types):
 
 
 def detect_loan_repayment_component(ded_types):
-	"""
-	Detect a deduction component that corresponds to 'Loan Repayment' (robust heuristics).
-	Returns the exact component label if found, otherwise None.
-	"""
 	if not ded_types:
 		return None
-	lowered = [d.strip().lower() for d in ded_types]
-	for i, d in enumerate(lowered):
-		# look for common patterns
-		if "loan" in d and ("repay" in d or "repayment" in d):
-			return ded_types[i]
-		# sometimes label might be 'Loan Repayment' exact
-		if d == "loan repayment":
-			return ded_types[i]
-	# fallback: exact match
-	for i, d in enumerate(lowered):
-		if d == "loan_repayment" or d == "loanrepayment":
-			return ded_types[i]
+	for d in ded_types:
+		if is_loan_repayment_label(d):
+			return d
 	return None
 
 
@@ -1592,23 +1571,7 @@ def get_earning_and_deduction_types(salary_slips):
 	return sorted(salary_component_and_type[_("Earning")]), sorted(salary_component_and_type[_("Deduction")])
 
 
-def update_column_width(ss, columns):
-	field_width_map = {
-		"branch": ("branch", 120),
-		"department": ("department", 120),
-		"designation": ("designation", 120),
-		"leave_without_pay": ("leave_without_pay", 120),
-	}
-	for key, (fieldname, width) in field_width_map.items():
-		if getattr(ss, key, None) is not None:
-			for col in columns:
-				if col.get("fieldname") == fieldname:
-					col.update({"width": width})
-					break
-
-
 def get_columns(earning_types, ded_types, report_currency, component_field_map, annual_label, arrears_label, has_arrears_component):
-	# basic columns
 	columns = [
 		{"label": _("Salary Slip ID"), "fieldname": "salary_slip_id", "fieldtype": "Link", "options": "Salary Slip", "width": 150},
 		{"label": _("Employee"), "fieldname": "employee", "fieldtype": "Link", "options": "Employee", "width": 120},
@@ -1626,30 +1589,21 @@ def get_columns(earning_types, ded_types, report_currency, component_field_map, 
 		{"label": _("Payment Days"), "fieldname": "payment_days", "fieldtype": "Float", "width": 120},
 	]
 
-	# earnings components columns
 	for earning in earning_types:
 		columns.append({"label": earning, "fieldname": component_field_map[earning], "fieldtype": "Currency", "options": report_currency, "width": 120})
 
-	# gross
 	columns.append({"label": _("Gross Pay"), "fieldname": "gross_pay", "fieldtype": "Currency", "options": report_currency, "width": 120})
 
-	# ❌ Removed arrears, arrears (slip), and annual variable pay columns here
-
-	# deduction columns
 	for deduction in ded_types:
 		columns.append({"label": deduction, "fieldname": component_field_map[deduction], "fieldtype": "Currency", "options": report_currency, "width": 120})
 
-	# Loan Repayment summary column (we populate this from the detected deduction component or fallback to top-level)
 	columns.append({"label": _("Loan Repayment"), "fieldname": "total_loan_repayment", "fieldtype": "Currency", "options": report_currency, "width": 140})
-
 	columns.extend([
 		{"label": _("Total Deduction"), "fieldname": "total_deduction", "fieldtype": "Currency", "options": report_currency, "width": 140},
 		{"label": _("Net Pay"), "fieldname": "net_pay", "fieldtype": "Currency", "options": report_currency, "width": 120},
 		{"label": _("Currency"), "fieldtype": "Data", "fieldname": "currency", "hidden": 1},
 	])
-
 	columns.append({"label": "Is Total Row", "fieldname": "is_total_row", "fieldtype": "Check", "hidden": 1})
-
 	return columns
 
 
@@ -1672,33 +1626,24 @@ def get_salary_slips(filters, company_currency):
 
 	if filters.get("docstatus"):
 		query = query.where(salary_slip.docstatus == doc_status[filters.get("docstatus")])
-
 	if filters.get("from_date"):
 		query = query.where(salary_slip.start_date >= filters.get("from_date"))
-
 	if filters.get("to_date"):
 		query = query.where(salary_slip.end_date <= filters.get("to_date"))
-
 	if filters.get("company"):
 		query = query.where(salary_slip.company == filters.get("company"))
-
 	if filters.get("employee"):
 		query = query.where(salary_slip.employee == filters.get("employee"))
-
 	if filters.get("currency") and filters.get("currency") != company_currency:
 		query = query.where(salary_slip.currency == filters.get("currency"))
-
 	if filters.get("department"):
 		query = query.where(salary_slip.department == filters["department"])
-
 	if filters.get("designation"):
 		query = query.where(salary_slip.designation == filters["designation"])
-
 	if filters.get("branch"):
 		query = query.where(salary_slip.branch == filters["branch"])
 
-	salary_slips = query.run(as_dict=1)
-	return salary_slips or []
+	return query.run(as_dict=1) or []
 
 
 def get_employee_doj_map():
@@ -1708,11 +1653,7 @@ def get_employee_doj_map():
 
 
 def get_salary_slip_details(salary_slips, currency, company_currency, component_type):
-	"""Return mapping { salary_slip_name: { salary_component_label: amount } }.
-	If currency != company currency, amounts are multiplied by the 
-	salary_slip.exchange_rate."""
 	salary_slips = [ss.name for ss in salary_slips]
-
 	result = (
 		frappe.qb.from_(salary_slip)
 		.join(salary_detail)
